@@ -10,6 +10,18 @@ export default defineConfig({
     },
   },
   envPrefix: ['VITE_', 'NEXT_PUBLIC_'],
+  build: {
+    rollupOptions: {
+      output: {
+        // Split large vendor libraries into separate cacheable chunks
+        manualChunks(id) {
+          if (!id.includes('node_modules')) return;
+          if (id.includes('@supabase')) return 'supabase';
+          return 'vendor';
+        },
+      },
+    },
+  },
   server: {
     port: 5173,
     host: true,

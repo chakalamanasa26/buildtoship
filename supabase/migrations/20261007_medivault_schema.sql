@@ -20,14 +20,17 @@ CREATE TABLE IF NOT EXISTS public.profiles (
 
 ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Users can view their own profile" ON public.profiles;
 CREATE POLICY "Users can view their own profile"
   ON public.profiles FOR SELECT
   USING (auth.uid() = id);
 
+DROP POLICY IF EXISTS "Users can update their own profile" ON public.profiles;
 CREATE POLICY "Users can update their own profile"
   ON public.profiles FOR UPDATE
   USING (auth.uid() = id);
 
+DROP POLICY IF EXISTS "Users can insert their own profile" ON public.profiles;
 CREATE POLICY "Users can insert their own profile"
   ON public.profiles FOR INSERT
   WITH CHECK (auth.uid() = id);
@@ -50,7 +53,7 @@ BEGIN
     updated_at = now();
   RETURN new;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
 
 DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
 CREATE TRIGGER on_auth_user_created
@@ -86,18 +89,22 @@ CREATE INDEX IF NOT EXISTS idx_medical_documents_created ON public.medical_docum
 
 ALTER TABLE public.medical_documents ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Users can view their own documents" ON public.medical_documents;
 CREATE POLICY "Users can view their own documents"
   ON public.medical_documents FOR SELECT
   USING (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "Users can insert their own documents" ON public.medical_documents;
 CREATE POLICY "Users can insert their own documents"
   ON public.medical_documents FOR INSERT
   WITH CHECK (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "Users can update their own documents" ON public.medical_documents;
 CREATE POLICY "Users can update their own documents"
   ON public.medical_documents FOR UPDATE
   USING (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "Users can delete their own documents" ON public.medical_documents;
 CREATE POLICY "Users can delete their own documents"
   ON public.medical_documents FOR DELETE
   USING (auth.uid() = user_id);
@@ -124,18 +131,22 @@ CREATE INDEX IF NOT EXISTS idx_appointments_date ON public.appointments(appointm
 
 ALTER TABLE public.appointments ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Users can view their own appointments" ON public.appointments;
 CREATE POLICY "Users can view their own appointments"
   ON public.appointments FOR SELECT
   USING (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "Users can insert their own appointments" ON public.appointments;
 CREATE POLICY "Users can insert their own appointments"
   ON public.appointments FOR INSERT
   WITH CHECK (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "Users can update their own appointments" ON public.appointments;
 CREATE POLICY "Users can update their own appointments"
   ON public.appointments FOR UPDATE
   USING (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "Users can delete their own appointments" ON public.appointments;
 CREATE POLICY "Users can delete their own appointments"
   ON public.appointments FOR DELETE
   USING (auth.uid() = user_id);
@@ -163,18 +174,22 @@ CREATE INDEX IF NOT EXISTS idx_shares_expires_at ON public.shares(expires_at);
 
 ALTER TABLE public.shares ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Users can view their own shares" ON public.shares;
 CREATE POLICY "Users can view their own shares"
   ON public.shares FOR SELECT
   USING (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "Users can insert their own shares" ON public.shares;
 CREATE POLICY "Users can insert their own shares"
   ON public.shares FOR INSERT
   WITH CHECK (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "Users can update their own shares" ON public.shares;
 CREATE POLICY "Users can update their own shares"
   ON public.shares FOR UPDATE
   USING (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "Users can delete their own shares" ON public.shares;
 CREATE POLICY "Users can delete their own shares"
   ON public.shares FOR DELETE
   USING (auth.uid() = user_id);
@@ -195,6 +210,7 @@ CREATE INDEX IF NOT EXISTS idx_shared_documents_doc ON public.shared_documents(d
 
 ALTER TABLE public.shared_documents ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Users can view their own shared_documents" ON public.shared_documents;
 CREATE POLICY "Users can view their own shared_documents"
   ON public.shared_documents FOR SELECT
   USING (
@@ -204,6 +220,7 @@ CREATE POLICY "Users can view their own shared_documents"
     )
   );
 
+DROP POLICY IF EXISTS "Users can insert their own shared_documents" ON public.shared_documents;
 CREATE POLICY "Users can insert their own shared_documents"
   ON public.shared_documents FOR INSERT
   WITH CHECK (
@@ -213,6 +230,7 @@ CREATE POLICY "Users can insert their own shared_documents"
     )
   );
 
+DROP POLICY IF EXISTS "Users can delete their own shared_documents" ON public.shared_documents;
 CREATE POLICY "Users can delete their own shared_documents"
   ON public.shared_documents FOR DELETE
   USING (
@@ -241,16 +259,21 @@ CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON public.audit_logs(created_a
 
 ALTER TABLE public.audit_logs ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Users can view their own audit logs" ON public.audit_logs;
 CREATE POLICY "Users can view their own audit logs"
   ON public.audit_logs FOR SELECT
   USING (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "Users can insert their own audit logs" ON public.audit_logs;
 CREATE POLICY "Users can insert their own audit logs"
   ON public.audit_logs FOR INSERT
   WITH CHECK (auth.uid() = user_id);
 
--- Backward compatibility view for legacy security_activity queries
-CREATE OR REPLACE VIEW public.security_activity AS
+-- Backward compatibility view for legacy security_activity queries.
+-- security_invoker = true makes the view respect audit_logs RLS; without it the
+-- view runs as its owner and would expose every user's audit log to any client.
+CREATE OR REPLACE VIEW public.security_activity
+  WITH (security_invoker = true) AS
   SELECT id, user_id, action, event_type, title, metadata, ip_address, created_at
   FROM public.audit_logs;
 
@@ -339,6 +362,31 @@ ON CONFLICT (id) DO UPDATE SET
   file_size_limit = 20971520,
   allowed_mime_types = ARRAY['application/pdf', 'image/jpeg', 'image/png'];
 
+-- Helper used by the share storage policy. SECURITY DEFINER so it can see
+-- shares/shared_documents regardless of the caller's RLS (anon recipients).
+-- view_count <= max_views because get_medical_share() increments the count
+-- before the client requests signed URLs.
+CREATE OR REPLACE FUNCTION public.is_actively_shared_object(p_name TEXT)
+RETURNS BOOLEAN
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT EXISTS (
+    SELECT 1
+    FROM public.shared_documents sd
+    JOIN public.shares s ON s.id = sd.share_id
+    JOIN public.medical_documents d ON d.id = sd.document_id
+    WHERE d.storage_path = p_name
+      AND s.revoked_at IS NULL
+      AND s.expires_at > now()
+      AND (s.max_views IS NULL OR s.view_count <= s.max_views)
+  );
+$$;
+
+GRANT EXECUTE ON FUNCTION public.is_actively_shared_object(TEXT) TO anon, authenticated;
+
 -- Storage RLS policies
 DO $$
 BEGIN
@@ -365,6 +413,23 @@ BEGIN
       WITH CHECK (
         bucket_id = 'medical-records'
         AND (auth.uid()::text = (storage.foldername(name))[1])
+      );
+  END IF;
+
+  -- Storage SELECT policy for public share links.
+  -- Recipients of /share/:token are anonymous, so without this policy they cannot
+  -- create signed URLs for shared files. Access is limited to objects linked to a
+  -- share that is currently active (not revoked, not expired, under max views).
+  -- Storage paths are only revealed through get_medical_share() with a valid token.
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies WHERE schemaname = 'storage' AND tablename = 'objects' AND policyname = 'Active shares can read shared medical records'
+  ) THEN
+    CREATE POLICY "Active shares can read shared medical records"
+      ON storage.objects FOR SELECT
+      TO anon, authenticated
+      USING (
+        bucket_id = 'medical-records'
+        AND public.is_actively_shared_object(name)
       );
   END IF;
 

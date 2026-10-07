@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, createContext, useContext, type ReactNode, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useState, createContext, useContext, type ReactNode, type FormEvent } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ErrorBoundary } from '@/components/error-boundary';
 import { Toaster } from '@/components/ui/toaster';
@@ -93,6 +93,24 @@ type AuditLog = {
 type Notice = { type: 'error' | 'success' | 'info'; text: string } | null;
 
 // Helpers
+/** Today's date as YYYY-MM-DD in the user's local timezone (toISOString() is UTC). */
+function localToday(): string {
+  const d = new Date();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${d.getFullYear()}-${mm}-${dd}`;
+}
+
+/** Mime types accepted by the 'medical-records' storage bucket. */
+function resolveMimeType(file: File): string {
+  const ext = file.name.split('.').pop()?.toLowerCase();
+  if (ext === 'pdf') return 'application/pdf';
+  if (ext === 'png') return 'image/png';
+  if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg';
+  if (file.type === 'image/jpg') return 'image/jpeg';
+  return file.type || 'application/octet-stream';
+}
+
 async function hashToken(token: string): Promise<string> {
   const bytes = new TextEncoder().encode(token);
   const digest = await crypto.subtle.digest('SHA-256', bytes);
@@ -126,7 +144,8 @@ function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
   const [ready, setReady] = useState(false);
 
-  const refresh = async () => {
+  // Stable reference so effects depending on `refresh` don't re-run on every render
+  const refresh = useCallback(async () => {
     if (!isSupabaseConfigured) {
       setReady(true);
       return;
@@ -134,7 +153,7 @@ function AuthProvider({ children }: { children: ReactNode }) {
     const { data } = await supabase.auth.getSession();
     setSession(data.session);
     setReady(true);
-  };
+  }, []);
 
   useEffect(() => {
     let alive = true;
@@ -504,6 +523,7 @@ function LoadingPage() {
 // Data Fetching Hook
 function useRows<T>(table: string, order: string = 'created_at', ascending = false) {
   const { user } = useAuth();
+  const userId = user?.id;
   const [rows, setRows] = useState<T[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -512,7 +532,7 @@ function useRows<T>(table: string, order: string = 'created_at', ascending = fal
   useEffect(() => {
     let live = true;
     async function load() {
-      if (!user) {
+      if (!userId) {
         setRows([]);
         setLoading(false);
         return;
@@ -542,7 +562,7 @@ function useRows<T>(table: string, order: string = 'created_at', ascending = fal
     return () => {
       live = false;
     };
-  }, [user, table, order, ascending, reload]);
+  }, [userId, table, order, ascending, reload]);
 
   return { rows, loading, error, refresh: () => setReload((x) => x + 1), setRows };
 }
@@ -1091,7 +1111,7 @@ function Dashboard() {
   const appts = useRows<Appt>('appointments', 'appointment_date', true);
 
   const upcoming = useMemo(() => {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = localToday();
     return appts.rows
       .filter((a) => a.appointment_date >= today)
       .slice(0, 3);
@@ -1545,12 +1565,13 @@ function UploadPage() {
     const id = crypto.randomUUID();
     const ext = file.name.split('.').pop()?.toLowerCase() || 'bin';
     const storagePath = `${user.id}/${id}.${ext}`;
+    const mimeType = resolveMimeType(file);
 
     // 1. Upload to Supabase Storage
     const { error: uploadError } = await supabase.storage
       .from('medical-records')
       .upload(storagePath, file, {
-        contentType: file.type || 'application/octet-stream',
+        contentType: mimeType,
         upsert: false,
       });
 
@@ -1571,7 +1592,7 @@ function UploadPage() {
       category: String(f.get('category') || 'Other'),
       file_name: file.name,
       storage_path: storagePath,
-      mime_type: file.type || 'application/octet-stream',
+      mime_type: mimeType,
       file_size: file.size,
       document_date: String(f.get('document_date') || '') || null,
       doctor_name: String(f.get('doctor_name') || '') || null,
@@ -2067,7 +2088,7 @@ function Appointments() {
   const [busy, setBusy] = useState(false);
   const [filter, setFilter] = useState<'upcoming' | 'past' | 'all'>('upcoming');
 
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localToday();
   const shown = rows
     .filter((a) =>
       filter === 'all'
@@ -3103,7 +3124,9 @@ function SettingsPage() {
 
   async function changePassword(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
-    const f = new FormData(e.currentTarget);
+    // Capture the form element now: React clears e.currentTarget after the first await.
+    const formEl = e.currentTarget;
+    const f = new FormData(formEl);
     const password = String(f.get('new_password') || '');
     if (password.length < 8) {
       setNotice({ type: 'error', text: 'Password must be at least 8 characters long.' });
@@ -3116,7 +3139,7 @@ function SettingsPage() {
       setNotice({ type: 'error', text: error.message });
     } else {
       setNotice({ type: 'success', text: 'Your password has been securely updated.' });
-      e.currentTarget.reset();
+      formEl.reset();
     }
   }
 

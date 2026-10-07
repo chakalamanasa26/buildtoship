@@ -1,196 +1,54 @@
-import { useCallback, useEffect, useMemo, useState, createContext, useContext, type ReactNode, type FormEvent } from 'react';
+import { useEffect, useMemo, useState, type ReactNode, type FormEvent } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ErrorBoundary } from '@/components/error-boundary';
 import { Toaster } from '@/components/ui/toaster';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase';
-import type { Session, User } from '@supabase/supabase-js';
-import { Route, Switch, Link, useLocation, Router as WouterRouter } from 'wouter';
+import { Route, Switch, Link, useLocation, useSearch, Router as WouterRouter } from 'wouter';
 import {
-  Activity, ArrowDownToLine, ArrowLeft, ArrowRight, ArrowUpRight, CalendarDays, Check, CheckCircle2,
-  ChevronDown, Clock3, FileText, Fingerprint, Heart, House, KeyRound, LockKeyhole, LogOut, Menu,
-  Plus, Search, Settings, Share2, Shield, ShieldCheck, Sparkles, Trash2, Upload, UserRound, X,
-  AlertCircle, Eye, EyeOff, Link2, Copy, Ban, Bell, CalendarPlus, LoaderCircle, ClipboardList,
-  FileClock, FolderOpen, Edit3, type LucideIcon
+  Activity, ArrowDownToLine, ArrowLeft, ArrowRight, CalendarDays, Check, CheckCircle2,
+  Clock3, FileText, Heart, House, KeyRound, LockKeyhole, LogOut, Menu,
+  Plus, Search, Settings, Share2, ShieldCheck, Sparkles, Trash2, Upload, UserRound, X,
+  AlertCircle, Eye, EyeOff, Link2, Copy, Ban, CalendarPlus, LoaderCircle,
+  FileClock, FolderOpen, Edit3, Pill, Receipt as ReceiptIcon, BellRing, Briefcase, Stethoscope, Cake,
+  type LucideIcon
 } from 'lucide-react';
 import NotFound from '@/pages/not-found';
+import { AuthProvider, useAuth } from '@/lib/auth';
+import { ProfileProvider, useProfile } from '@/lib/profile';
+import { hashToken, recordAudit, resolveMimeType } from '@/lib/helpers';
+import type { Appt, AuditLog, Doc, ShareItem } from '@/lib/types';
+import {
+  calcAge, formatAge, formatAgeDetailed, formatDate, formatDateTime, formatTime, formatTimestamp,
+  localToday, normTime, parseDate, combineDateTime, remindLabel,
+} from '@/lib/datetime';
+import {
+  DataAlert, EmptyState, Field, Modal, Notice, PageHeading, LoadingPage, SelectField, SkeletonRows,
+  Stat, TextAreaField, Badge, primaryButtonCls, ghostButtonCls, useRows,
+} from '@/components/common';
+import { Brand } from '@/components/brand';
+import { AppointmentModal, type AppointmentDefaults } from '@/features/appointment-form';
+import { MedicinesPage } from '@/features/medicines';
+import { ReceiptsPage } from '@/features/receipts';
+import { DueBanner, DoseRow, RemindersPage, RemindersProvider, useReminders } from '@/features/reminders';
+import { SearchPage } from '@/features/search';
+import { SharePublic } from '@/features/share-public';
+import { TimelinePage } from '@/features/timeline';
+import { VisitPackPage } from '@/features/visit-pack';
+import { medicineStatus } from '@/features/medicines';
 
 const queryClient = new QueryClient();
 
-// Types
-type AuthCtx = {
-  session: Session | null;
-  user: User | null;
-  ready: boolean;
-  refresh: () => Promise<void>;
-};
-
-const AuthContext = createContext<AuthCtx>({
-  session: null,
-  user: null,
-  ready: false,
-  refresh: async () => {},
-});
-
-const useAuth = () => useContext(AuthContext);
-
-type Doc = {
-  id: string;
-  user_id?: string;
-  title: string;
-  category: string | null;
-  file_name: string;
-  storage_path: string;
-  mime_type: string;
-  file_size: number;
-  document_date: string | null;
-  doctor_name: string | null;
-  hospital_name: string | null;
-  description: string | null;
-  extracted_text: string | null;
-  ai_summary: string | null;
-  ai_status: string | null;
-  created_at: string;
-};
-
-type Appt = {
-  id: string;
-  user_id?: string;
-  doctor_name: string | null;
-  hospital_name: string | null;
-  appointment_date: string;
-  appointment_time: string | null;
-  reason: string | null;
-  notes: string | null;
-  status: string | null;
-  created_at?: string;
-};
-
-type ShareItem = {
-  id: string;
-  user_id?: string;
-  recipient: string | null;
-  permission: 'VIEW' | 'VIEW_DOWNLOAD';
-  token_hash: string;
-  expires_at: string;
-  max_views: number | null;
-  view_count: number | null;
-  revoked_at: string | null;
-  created_at: string;
-  documents?: Doc[];
-};
-
-type AuditLog = {
-  id: string;
-  user_id?: string;
-  action: string;
-  event_type?: string;
-  title: string;
-  metadata?: Record<string, any> | string | null;
-  created_at: string;
-};
-
-type Notice = { type: 'error' | 'success' | 'info'; text: string } | null;
-
-// Helpers
-/** Today's date as YYYY-MM-DD in the user's local timezone (toISOString() is UTC). */
-function localToday(): string {
-  const d = new Date();
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const dd = String(d.getDate()).padStart(2, '0');
-  return `${d.getFullYear()}-${mm}-${dd}`;
-}
-
-/** Mime types accepted by the 'medical-records' storage bucket. */
-function resolveMimeType(file: File): string {
-  const ext = file.name.split('.').pop()?.toLowerCase();
-  if (ext === 'pdf') return 'application/pdf';
-  if (ext === 'png') return 'image/png';
-  if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg';
-  if (file.type === 'image/jpg') return 'image/jpeg';
-  return file.type || 'application/octet-stream';
-}
-
-async function hashToken(token: string): Promise<string> {
-  const bytes = new TextEncoder().encode(token);
-  const digest = await crypto.subtle.digest('SHA-256', bytes);
-  return Array.from(new Uint8Array(digest))
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
-}
-
-async function recordAudit(
-  userId: string | undefined,
-  action: string,
-  title: string,
-  metadata?: Record<string, any>
-) {
-  if (!userId || !isSupabaseConfigured) return;
-  try {
-    await supabase.from('audit_logs').insert({
-      user_id: userId,
-      action,
-      event_type: action,
-      title,
-      metadata: metadata || {},
-    });
-  } catch {
-    // Audit log insertion fails silently if table is not yet migrated
-  }
-}
-
-// Auth Provider
-function AuthProvider({ children }: { children: ReactNode }) {
-  const [session, setSession] = useState<Session | null>(null);
-  const [ready, setReady] = useState(false);
-
-  // Stable reference so effects depending on `refresh` don't re-run on every render
-  const refresh = useCallback(async () => {
-    if (!isSupabaseConfigured) {
-      setReady(true);
-      return;
-    }
-    const { data } = await supabase.auth.getSession();
-    setSession(data.session);
-    setReady(true);
-  }, []);
-
-  useEffect(() => {
-    let alive = true;
-    if (!isSupabaseConfigured) {
-      setReady(true);
-      return;
-    }
-    supabase.auth.getSession().then(({ data }) => {
-      if (alive) {
-        setSession(data.session);
-        setReady(true);
-      }
-    });
-
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, next) => {
-      if (alive) {
-        setSession(next);
-        setReady(true);
-      }
-    });
-
-    return () => {
-      alive = false;
-      subscription.unsubscribe();
-    };
-  }, []);
-
-  return (
-    <AuthContext.Provider
-      value={{ session, user: session?.user ?? null, ready, refresh }}
-    >
-      {children}
-    </AuthContext.Provider>
-  );
-}
+const RECORD_CATEGORIES = [
+  'Lab result',
+  'Imaging',
+  'Prescription',
+  'Consultation',
+  'Vaccination',
+  'Discharge summary',
+  'Insurance',
+  'Other',
+];
 
 // Notice & Alerts
 function ConfigNotice() {
@@ -210,52 +68,6 @@ function ConfigNotice() {
   );
 }
 
-function Notice({ notice, dismiss }: { notice: Notice; dismiss: () => void }) {
-  if (!notice) return null;
-  const cls =
-    notice.type === 'error'
-      ? 'border-rose-200 bg-rose-50 text-rose-900'
-      : notice.type === 'success'
-      ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
-      : 'border-teal-200 bg-teal-50 text-teal-900';
-  return (
-    <div
-      role="status"
-      data-testid="status-notice"
-      className={`mb-5 flex items-start justify-between gap-3 rounded-xl border px-4 py-3 text-sm ${cls}`}
-    >
-      <span>{notice.text}</span>
-      <button
-        onClick={dismiss}
-        aria-label="Dismiss notice"
-        data-testid="button-dismiss-notice"
-        className="p-0.5 hover:opacity-75"
-      >
-        <X className="h-4 w-4" />
-      </button>
-    </div>
-  );
-}
-
-function Brand({ light = false }: { light?: boolean }) {
-  return (
-    <Link
-      href="/"
-      className={`flex items-center gap-2.5 ${light ? 'text-white' : 'text-foreground'}`}
-      data-testid="link-brand"
-    >
-      <span
-        className={`grid h-9 w-9 place-items-center rounded-xl ${
-          light ? 'bg-white/15' : 'bg-primary text-primary-foreground'
-        }`}
-      >
-        <Heart className="h-[18px] w-[18px]" strokeWidth={2.4} />
-      </span>
-      <span className="font-bold tracking-tight text-lg">MediVault</span>
-    </Link>
-  );
-}
-
 // Navigation & Shell
 const navGroups: {
   title: string;
@@ -268,11 +80,16 @@ const navGroups: {
       { label: 'My records', href: '/records', icon: FolderOpen },
       { label: 'Timeline', href: '/timeline', icon: FileClock },
       { label: 'Appointments', href: '/appointments', icon: CalendarDays },
+      { label: 'Search', href: '/search', icon: Search },
     ],
   },
   {
     title: 'Your care',
     items: [
+      { label: 'Medicines', href: '/medicines', icon: Pill },
+      { label: 'Receipts', href: '/receipts', icon: ReceiptIcon },
+      { label: 'Reminders', href: '/reminders', icon: BellRing },
+      { label: 'Visit Pack', href: '/visit-pack', icon: Briefcase },
       { label: 'Sharing', href: '/sharing', icon: Share2 },
       { label: 'Security Activity', href: '/security', icon: Activity },
     ],
@@ -288,6 +105,7 @@ const navGroups: {
 
 function AppShell({ children }: { children: ReactNode }) {
   const { user } = useAuth();
+  const { age } = useProfile();
   const [loc] = useLocation();
   const [open, setOpen] = useState(false);
   const [signing, setSigning] = useState(false);
@@ -333,6 +151,14 @@ function AppShell({ children }: { children: ReactNode }) {
               <div className="truncate text-xs text-muted-foreground">
                 {user?.email || 'Private space'}
               </div>
+              {age && (
+                <div
+                  className="mt-0.5 flex items-center gap-1 text-[11px] font-medium text-[#4d7568]"
+                  data-testid="text-sidebar-age"
+                >
+                  <Cake className="h-3 w-3" /> Age {formatAge(age)}
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -439,6 +265,7 @@ function AppShell({ children }: { children: ReactNode }) {
             </div>
           </div>
         </header>
+        <DueBanner />
         <main className="mx-auto w-full max-w-[1180px] px-5 py-8 md:px-9 md:py-10 flex-1">
           {children}
         </main>
@@ -472,189 +299,6 @@ function Protected({ children }: { children: ReactNode }) {
 
   if (!ready || !user) return <LoadingPage />;
   return <AppShell>{children}</AppShell>;
-}
-
-function PageHeading({
-  eyebrow,
-  title,
-  subtitle,
-  action,
-}: {
-  eyebrow?: string;
-  title: string;
-  subtitle?: string;
-  action?: ReactNode;
-}) {
-  return (
-    <div className="mb-7 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
-      <div>
-        {eyebrow && (
-          <p className="mb-2 text-[10px] font-bold uppercase tracking-[.16em] text-primary">
-            {eyebrow}
-          </p>
-        )}
-        <h1 className="mv-title text-[32px] font-semibold leading-tight md:text-[38px]">
-          {title}
-        </h1>
-        {subtitle && (
-          <p className="mt-2 max-w-2xl text-sm leading-relaxed text-muted-foreground">
-            {subtitle}
-          </p>
-        )}
-      </div>
-      {action}
-    </div>
-  );
-}
-
-function LoadingPage() {
-  return (
-    <div className="min-h-[60vh] p-6">
-      <div className="mx-auto max-w-5xl animate-pulse space-y-4">
-        <div className="h-5 w-32 rounded bg-[#e5ece5]" />
-        <div className="mt-5 h-10 w-1/2 rounded bg-[#e5ece5]" />
-        <div className="mt-3 h-4 w-2/3 rounded bg-[#e5ece5]" />
-        <div className="mt-10 h-52 rounded-2xl bg-[#e5ece5]" />
-      </div>
-    </div>
-  );
-}
-
-// Data Fetching Hook
-function useRows<T>(table: string, order: string = 'created_at', ascending = false) {
-  const { user } = useAuth();
-  const userId = user?.id;
-  const [rows, setRows] = useState<T[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [reload, setReload] = useState(0);
-
-  useEffect(() => {
-    let live = true;
-    async function load() {
-      if (!userId) {
-        setRows([]);
-        setLoading(false);
-        return;
-      }
-      setLoading(true);
-      try {
-        const { data, error } = await supabase
-          .from(table)
-          .select('*')
-          .order(order, { ascending });
-        if (!live) return;
-        if (error) {
-          setError(error.message);
-          setRows([]);
-        } else {
-          setRows((data || []) as T[]);
-          setError(null);
-        }
-      } catch (err: any) {
-        if (!live) return;
-        setError(err?.message || 'Failed to load records.');
-      } finally {
-        if (live) setLoading(false);
-      }
-    }
-    load();
-    return () => {
-      live = false;
-    };
-  }, [userId, table, order, ascending, reload]);
-
-  return { rows, loading, error, refresh: () => setReload((x) => x + 1), setRows };
-}
-
-function DataAlert({ error, retry }: { error: string; retry: () => void }) {
-  const isSchemaMissing = error.toLowerCase().includes('schema cache') || error.toLowerCase().includes('not find the table');
-  return (
-    <div className="rounded-2xl border border-amber-200 bg-amber-50 p-5 mb-5">
-      <div className="flex gap-3">
-        <AlertCircle className="h-5 w-5 shrink-0 text-amber-700" />
-        <div>
-          <p className="text-sm font-semibold text-amber-950">
-            {isSchemaMissing ? 'Database tables are being set up' : "We couldn't load this information"}
-          </p>
-          <p className="mt-1 text-xs leading-5 text-amber-900/80">
-            {isSchemaMissing
-              ? 'The required database tables were not found in the Supabase project. Run the migration SQL in your Supabase SQL Editor.'
-              : `${error}. Check your connection and try again.`}
-          </p>
-          <button
-            onClick={retry}
-            className="mt-3 rounded-lg border border-amber-300 bg-white/70 px-3 py-1.5 text-xs font-semibold text-amber-900 hover:bg-white"
-            data-testid="button-retry-load"
-          >
-            Try again
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function EmptyState({
-  icon: Icon = FolderOpen,
-  title,
-  body,
-  action,
-}: {
-  icon?: LucideIcon;
-  title: string;
-  body: string;
-  action?: ReactNode;
-}) {
-  return (
-    <div className="mv-card flex flex-col items-center px-6 py-12 text-center">
-      <span className="grid h-12 w-12 place-items-center rounded-2xl bg-[#e9f0e8] text-primary">
-        <Icon className="h-5 w-5" />
-      </span>
-      <h3 className="mt-4 font-semibold text-base">{title}</h3>
-      <p className="mt-2 max-w-sm text-sm leading-6 text-muted-foreground">{body}</p>
-      {action && <div className="mt-5">{action}</div>}
-    </div>
-  );
-}
-
-function Stat({
-  icon: Icon,
-  label,
-  value,
-  sub,
-}: {
-  icon: LucideIcon;
-  label: string;
-  value: string;
-  sub: string;
-}) {
-  return (
-    <div className="mv-card p-5">
-      <div className="flex items-center justify-between">
-        <span className="text-xs font-medium text-muted-foreground">{label}</span>
-        <Icon className="h-4 w-4 text-primary" />
-      </div>
-      <div className="mt-3 text-3xl font-semibold tracking-tight">{value}</div>
-      <div className="mt-1 text-[11px] text-muted-foreground">{sub}</div>
-    </div>
-  );
-}
-
-function SkeletonRows() {
-  return (
-    <div className="mt-5 animate-pulse space-y-4">
-      {[0, 1, 2].map((n) => (
-        <div key={n} className="flex gap-3">
-          <div className="h-10 w-10 rounded-xl bg-[#e7eee6]" />
-          <div className="flex-1">
-            <div className="h-3 w-1/2 rounded bg-[#e7eee6]" />
-            <div className="mt-2 h-2 w-1/3 rounded bg-[#edf1eb]" />
-          </div>
-        </div>
-      ))}
-    </div>
-  );
 }
 
 // -----------------------------------------------------------------------------
@@ -806,49 +450,6 @@ function AuthLayout({
           {children}
         </div>
       </main>
-    </div>
-  );
-}
-
-function Field({
-  label,
-  name,
-  type = 'text',
-  placeholder = '',
-  required = false,
-  autoComplete,
-  value,
-  defaultValue,
-  onChange,
-}: {
-  label: string;
-  name: string;
-  type?: string;
-  placeholder?: string;
-  required?: boolean;
-  autoComplete?: string;
-  value?: string;
-  defaultValue?: string;
-  onChange?: (e: React.ChangeEvent<HTMLInputElement>) => void;
-}) {
-  return (
-    <div>
-      <label htmlFor={name} className="mb-1.5 block text-xs font-semibold text-[#49655b]">
-        {label}
-      </label>
-      <input
-        id={name}
-        name={name}
-        type={type}
-        placeholder={placeholder}
-        required={required}
-        autoComplete={autoComplete}
-        value={value}
-        defaultValue={defaultValue}
-        onChange={onChange}
-        data-testid={`input-${name.replaceAll('_', '-')}`}
-        className="w-full rounded-xl border border-[#d9e3da] bg-[#fffefa] px-3.5 py-3 text-sm outline-none transition placeholder:text-[#a2b0a7] focus:border-primary focus:ring-2 focus:ring-primary/10"
-      />
     </div>
   );
 }
@@ -1107,6 +708,8 @@ function Callback() {
 // -----------------------------------------------------------------------------
 function Dashboard() {
   const { user } = useAuth();
+  const { age } = useProfile();
+  const rem = useReminders();
   const docs = useRows<Doc>('medical_documents');
   const appts = useRows<Appt>('appointments', 'appointment_date', true);
 
@@ -1116,6 +719,26 @@ function Dashboard() {
       .filter((a) => a.appointment_date >= today)
       .slice(0, 3);
   }, [appts.rows]);
+
+  const activeMedicines = useMemo(
+    () => rem.medicines.filter((m) => medicineStatus(m) === 'active').length,
+    [rem.medicines]
+  );
+  const nextFollowUp = useMemo(
+    () =>
+      appts.rows
+        .filter(
+          (a) =>
+            a.appointment_type === 'follow_up' &&
+            combineDateTime(a.appointment_date, a.appointment_time).getTime() >= Date.now()
+        )
+        .sort(
+          (a, b) =>
+            combineDateTime(a.appointment_date, a.appointment_time).getTime() -
+            combineDateTime(b.appointment_date, b.appointment_time).getTime()
+        )[0],
+    [appts.rows]
+  );
 
   const errors = docs.error || appts.error;
 
@@ -1128,7 +751,9 @@ function Dashboard() {
             ? `, ${user.user_metadata.full_name.split(' ')[0]}`
             : ''
         }.`}
-        subtitle="A clear view of your records, appointments, and care history."
+        subtitle={`A clear view of your records, medicines, appointments, and care history.${
+          age ? ` Age ${formatAge(age)}.` : ''
+        }`}
         action={
           <Link
             href="/records/upload"
@@ -1170,6 +795,62 @@ function Dashboard() {
           value="Protected"
           sub="Private RLS encryption"
         />
+      </div>
+
+      <div className="mt-6 grid gap-6 lg:grid-cols-[1.25fr_.75fr]">
+        <section className="mv-card p-5 sm:p-6" data-testid="card-dashboard-doses">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-xs font-semibold text-primary">{activeMedicines} active medicine{activeMedicines === 1 ? '' : 's'}</p>
+              <h2 className="mv-title mt-1 text-2xl font-semibold">Today&apos;s medicines</h2>
+            </div>
+            <Link href="/reminders" className="text-xs font-semibold text-primary hover:underline" data-testid="link-dashboard-reminders">
+              All reminders
+            </Link>
+          </div>
+          {rem.loading && rem.reminders.length === 0 ? (
+            <SkeletonRows />
+          ) : rem.todayDoses.length === 0 ? (
+            <p className="mt-4 text-sm text-muted-foreground">
+              No doses scheduled for today. Reminders use only the times you set up.
+            </p>
+          ) : (
+            <div className="mt-3 divide-y divide-[#e8eee7]">
+              {rem.todayDoses.slice(0, 5).map((d) => (
+                <DoseRow key={d.key} dose={d} />
+              ))}
+              {rem.todayDoses.length > 5 && (
+                <Link href="/reminders" className="block pt-3 text-xs font-semibold text-primary hover:underline">
+                  +{rem.todayDoses.length - 5} more today
+                </Link>
+              )}
+            </div>
+          )}
+        </section>
+
+        <section className="mv-card p-5 sm:p-6" data-testid="card-next-followup">
+          <p className="text-xs font-semibold text-primary">Next visit</p>
+          <h2 className="mv-title mt-1 text-2xl font-semibold">Follow-up</h2>
+          {nextFollowUp ? (
+            <div className="mt-4 rounded-xl border border-[#e1e9df] bg-[#f3f6f0] p-3.5">
+              <p className="flex items-center gap-2 text-sm font-semibold">
+                <Stethoscope className="h-4 w-4 text-primary" />
+                {nextFollowUp.doctor_name || 'Follow-up visit'}
+              </p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                {[nextFollowUp.hospital_name, formatDateTime(nextFollowUp.appointment_date, nextFollowUp.appointment_time)]
+                  .filter(Boolean)
+                  .join(' · ')}
+              </p>
+              <p className="mt-1 text-xs text-muted-foreground">Reminder: {remindLabel(nextFollowUp.remind_before_minutes)}</p>
+            </div>
+          ) : (
+            <p className="mt-4 text-sm text-muted-foreground">
+              No follow-up scheduled.{' '}
+              <Link href="/reminders" className="font-semibold text-primary hover:underline">Add one</Link>
+            </p>
+          )}
+        </section>
       </div>
 
       <div className="mt-8 grid gap-6 lg:grid-cols-[1.25fr_.75fr]">
@@ -1290,7 +971,7 @@ function Dashboard() {
                   <div className="min-w-0 flex-1">
                     <p className="truncate text-sm font-semibold">{a.doctor_name || 'Appointment'}</p>
                     <p className="mt-0.5 truncate text-xs text-muted-foreground">
-                      {a.hospital_name || 'Clinic/Hospital'} {a.appointment_time ? `· ${a.appointment_time}` : ''}
+                      {a.hospital_name || 'Clinic/Hospital'} {a.appointment_time ? `· ${formatTime(a.appointment_time)}` : ''}
                     </p>
                   </div>
                 </div>
@@ -1351,7 +1032,7 @@ function RecordRow({
         <p className="mt-1 truncate text-xs text-muted-foreground">
           {doc.category || 'Record'} ·{' '}
           {doc.document_date
-            ? new Date(doc.document_date + 'T12:00:00').toLocaleDateString()
+            ? formatDateTime(doc.document_date, doc.document_time)
             : new Date(doc.created_at).toLocaleDateString()}{' '}
           · {(doc.file_size / 1024 / 1024).toFixed(2)} MB
         </p>
@@ -1601,7 +1282,12 @@ function UploadPage() {
       ai_status: 'not_requested',
     };
 
-    const { error: dbError } = await supabase.from('medical_documents').insert(payload);
+    // Exact time of the event (optional). Only sent when entered so uploads keep
+    // working on databases that haven't been migrated yet.
+    const documentTime = normTime(String(f.get('document_time') || ''));
+    const insertPayload = documentTime ? { ...payload, document_time: documentTime } : payload;
+
+    const { error: dbError } = await supabase.from('medical_documents').insert(insertPayload);
 
     if (dbError) {
       // Clean up orphaned storage file
@@ -1712,6 +1398,7 @@ function UploadPage() {
               </select>
             </div>
             <Field label="Document date" name="document_date" type="date" />
+            <Field label="Time of visit or test (optional)" name="document_time" type="time" />
             <Field label="Doctor or provider" name="doctor_name" placeholder="Optional" />
             <Field label="Clinic or hospital" name="hospital_name" placeholder="Optional" />
             <div className="sm:col-span-2">
@@ -1780,7 +1467,38 @@ function RecordDetail({ id }: { id: string }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice>(null);
+  const [editing, setEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [, navigate] = useLocation();
+
+  async function saveEdits(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    if (!doc) return;
+    const f = new FormData(e.currentTarget);
+    const time = normTime(String(f.get('document_time') || ''));
+    const update: Record<string, unknown> = {
+      title: String(f.get('title') || '').trim() || doc.title,
+      category: String(f.get('category') || 'Other'),
+      document_date: String(f.get('document_date') || '') || null,
+      doctor_name: String(f.get('doctor_name') || '').trim() || null,
+      hospital_name: String(f.get('hospital_name') || '').trim() || null,
+      description: String(f.get('description') || '').trim() || null,
+    };
+    if (time || doc.document_time) update.document_time = time;
+    setSaving(true);
+    const { error: upErr } = await supabase.from('medical_documents').update(update).eq('id', doc.id);
+    setSaving(false);
+    if (upErr) {
+      setNotice({ type: 'error', text: upErr.message });
+      return;
+    }
+    await recordAudit(user?.id, 'document_updated', 'Medical record details updated', {
+      document_id: doc.id,
+    });
+    setEditing(false);
+    setNotice({ type: 'success', text: 'Record details updated.' });
+    setDoc({ ...doc, ...(update as Partial<Doc>) });
+  }
 
   const load = async () => {
     setLoading(true);
@@ -1883,6 +1601,14 @@ function RecordDetail({ id }: { id: string }) {
               <ArrowDownToLine className="h-4 w-4" /> Download / View file
             </button>
             <button
+              onClick={() => setEditing(true)}
+              className="rounded-xl border border-[#d9e3da] bg-white px-3 py-2.5 text-[#44695d] hover:bg-[#f3f7f1] transition"
+              aria-label="Edit record details"
+              data-testid="button-edit-record"
+            >
+              <Edit3 className="h-4 w-4" />
+            </button>
+            <button
               onClick={remove}
               className="rounded-xl border border-rose-200 bg-white px-3 py-2.5 text-rose-700 hover:bg-rose-50 transition"
               aria-label="Delete record"
@@ -1903,10 +1629,8 @@ function RecordDetail({ id }: { id: string }) {
               ['File name', doc.file_name],
               ['Category', doc.category],
               [
-                'Document date',
-                doc.document_date
-                  ? new Date(doc.document_date + 'T12:00:00').toLocaleDateString()
-                  : null,
+                'Date & time',
+                doc.document_date ? formatDateTime(doc.document_date, doc.document_time) : null,
               ],
               ['Provider / Doctor', doc.doctor_name],
               ['Clinic or hospital', doc.hospital_name],
@@ -1936,141 +1660,29 @@ function RecordDetail({ id }: { id: string }) {
           </p>
         </aside>
       </div>
-    </div>
-  );
-}
 
-// -----------------------------------------------------------------------------
-// MEDICAL TIMELINE
-// -----------------------------------------------------------------------------
-function Timeline() {
-  const docs = useRows<Doc>('medical_documents');
-  const appts = useRows<Appt>('appointments', 'appointment_date', false);
-  const [year, setYear] = useState('all');
-
-  const events = useMemo(() => {
-    const docEvents = docs.rows.map((d) => ({
-      id: `d-${d.id}`,
-      date: d.document_date || d.created_at.slice(0, 10),
-      title: d.title || d.file_name,
-      type: d.category || 'Record',
-      href: `/records/${d.id}`,
-      icon: FileText,
-    }));
-
-    const apptEvents = appts.rows.map((a) => ({
-      id: `a-${a.id}`,
-      date: a.appointment_date,
-      title: a.doctor_name || 'Appointment',
-      type: 'Appointment',
-      href: '/appointments',
-      icon: CalendarDays,
-    }));
-
-    return [...docEvents, ...apptEvents].sort((a, b) => b.date.localeCompare(a.date));
-  }, [docs.rows, appts.rows]);
-
-  const years = useMemo(
-    () => Array.from(new Set(events.map((x) => x.date.slice(0, 4)))),
-    [events]
-  );
-
-  const filtered = year === 'all' ? events : events.filter((x) => x.date.startsWith(year));
-  const error = docs.error || appts.error;
-
-  return (
-    <div className="mv-enter">
-      <PageHeading
-        eyebrow="Your care history"
-        title="Medical Timeline"
-        subtitle="Chronological record of your documents, diagnostic reports, and medical visits."
-        action={
-          <select
-            value={year}
-            onChange={(e) => setYear(e.target.value)}
-            className="rounded-xl border border-[#dce5dc] bg-[#fffefa] px-4 py-2.5 text-sm outline-none focus:border-primary"
-            data-testid="select-timeline-year"
-          >
-            <option value="all">All years</option>
-            {years.map((y) => (
-              <option key={y}>{y}</option>
-            ))}
-          </select>
-        }
-      />
-
-      {error ? (
-        <DataAlert
-          error={error}
-          retry={() => {
-            docs.refresh();
-            appts.refresh();
-          }}
-        />
-      ) : docs.loading || appts.loading ? (
-        <div className="mv-card p-6">
-          <SkeletonRows />
-        </div>
-      ) : events.length === 0 ? (
-        <EmptyState
-          icon={FileClock}
-          title="Your timeline starts here"
-          body="Upload records or schedule appointments to build your chronological medical timeline."
-          action={
-            <Link
-              href="/records/upload"
-              className="mv-button inline-flex items-center gap-2 rounded-xl bg-primary px-4 py-2.5 text-xs font-semibold text-primary-foreground"
-              data-testid="link-timeline-upload"
-            >
-              <Plus className="h-4 w-4" /> Add your first record
-            </Link>
-          }
-        />
-      ) : filtered.length === 0 ? (
-        <EmptyState
-          icon={Search}
-          title="No events in this year"
-          body="Select another year or choose 'All years' to view entries."
-        />
-      ) : (
-        <div className="mv-card p-5 sm:p-8">
-          <div className="relative space-y-5 before:absolute before:bottom-5 before:left-[70px] before:top-5 before:w-px before:bg-[#d6e2d6] sm:before:left-[91px]">
-            {filtered.map((event) => (
-              <div
-                key={event.id}
-                className="relative grid grid-cols-[58px_24px_1fr] items-start gap-3 sm:grid-cols-[78px_26px_1fr] sm:gap-4"
-                data-testid={`timeline-event-${event.id}`}
-              >
-                <div className="pt-3 text-right font-mono text-[10px] text-[#788e83]">
-                  {new Date(event.date + 'T12:00:00').toLocaleDateString(undefined, {
-                    month: 'short',
-                    day: 'numeric',
-                    year: 'numeric',
-                  })}
-                </div>
-                <span className="z-10 mt-3 grid h-6 w-6 place-items-center rounded-full border-4 border-[#e5efe4] bg-[#4c8070]">
-                  <span className="h-1.5 w-1.5 rounded-full bg-white" />
-                </span>
-                <Link
-                  href={event.href}
-                  className="flex items-center gap-3 rounded-xl border border-[#e3ebe2] bg-[#fbfcf8] p-3.5 hover:border-primary/50 transition"
-                  data-testid={`link-event-${event.id}`}
-                >
-                  <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-[#eaf1e8] text-primary">
-                    <event.icon className="h-4 w-4" />
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <span className="block truncate text-sm font-semibold">{event.title}</span>
-                    <span className="mt-0.5 block text-xs text-muted-foreground">
-                      {event.type}
-                    </span>
-                  </div>
-                  <ArrowRight className="ml-auto h-4 w-4 shrink-0 text-[#91a49a]" />
-                </Link>
-              </div>
-            ))}
-          </div>
-        </div>
+      {editing && (
+        <Modal title="Edit record details" close={() => setEditing(false)}>
+          <form onSubmit={saveEdits} className="space-y-4" data-testid="form-edit-record">
+            <Field label="Document title" name="title" required defaultValue={doc.title} />
+            <SelectField label="Category" name="category" defaultValue={doc.category || 'Other'}>
+              {RECORD_CATEGORIES.map((x) => (
+                <option key={x}>{x}</option>
+              ))}
+            </SelectField>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Field label="Date" name="document_date" type="date" defaultValue={doc.document_date || ''} />
+              <Field label="Time (optional)" name="document_time" type="time" defaultValue={normTime(doc.document_time) || ''} />
+              <Field label="Doctor or provider" name="doctor_name" defaultValue={doc.doctor_name || ''} />
+              <Field label="Clinic or hospital" name="hospital_name" defaultValue={doc.hospital_name || ''} />
+            </div>
+            <TextAreaField label="Notes" name="description" defaultValue={doc.description || ''} />
+            <button disabled={saving} className={`${primaryButtonCls} w-full`} data-testid="button-save-record-edit">
+              {saving && <LoaderCircle className="h-4 w-4 animate-spin" />}
+              Save changes
+            </button>
+          </form>
+        </Modal>
       )}
     </div>
   );
@@ -2082,76 +1694,49 @@ function Timeline() {
 function Appointments() {
   const { user } = useAuth();
   const { rows, loading, error, refresh } = useRows<Appt>('appointments', 'appointment_date', true);
+  const reminders = useReminders();
+  const params = useSearch();
   const [dialog, setDialog] = useState(false);
   const [editingAppt, setEditingAppt] = useState<Appt | null>(null);
+  const [defaults, setDefaults] = useState<AppointmentDefaults | undefined>();
   const [notice, setNotice] = useState<Notice>(null);
-  const [busy, setBusy] = useState(false);
   const [filter, setFilter] = useState<'upcoming' | 'past' | 'all'>('upcoming');
+  const [typeFilter, setTypeFilter] = useState<'all' | 'appointment' | 'follow_up'>('all');
 
-  const today = localToday();
-  const shown = rows
-    .filter((a) =>
-      filter === 'all'
-        ? true
-        : filter === 'upcoming'
-        ? a.appointment_date >= today
-        : a.appointment_date < today
-    )
-    .sort((a, b) =>
-      filter === 'past'
-        ? b.appointment_date.localeCompare(a.appointment_date)
-        : a.appointment_date.localeCompare(b.appointment_date)
-    );
-
-  async function save(e: FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    if (!user) return;
-    const f = new FormData(e.currentTarget);
-    setBusy(true);
-
-    const payload = {
-      user_id: user.id,
-      doctor_name: String(f.get('doctor_name') || '') || null,
-      hospital_name: String(f.get('hospital_name') || '') || null,
-      appointment_date: String(f.get('appointment_date')),
-      appointment_time: String(f.get('appointment_time') || '') || null,
-      reason: String(f.get('reason') || '') || null,
-      notes: String(f.get('notes') || '') || null,
-      status: 'scheduled',
-    };
-
-    let saveError: any = null;
-
-    if (editingAppt) {
-      const { error } = await supabase
-        .from('appointments')
-        .update(payload)
-        .eq('id', editingAppt.id);
-      saveError = error;
-    } else {
-      const { error } = await supabase.from('appointments').insert(payload);
-      saveError = error;
-    }
-
-    setBusy(false);
-
-    if (saveError) {
-      setNotice({ type: 'error', text: saveError.message });
-    } else {
-      await recordAudit(
-        user.id,
-        editingAppt ? 'appointment_updated' : 'appointment_created',
-        editingAppt ? 'Appointment updated' : 'Appointment scheduled'
-      );
-      setNotice({
-        type: 'success',
-        text: editingAppt ? 'Appointment updated.' : 'Appointment added to your schedule.',
-      });
-      setDialog(false);
+  // /appointments?new=follow_up opens the follow-up form (shortcut from other pages)
+  useEffect(() => {
+    const p = new URLSearchParams(params);
+    if (p.get('new') === 'follow_up') {
       setEditingAppt(null);
-      refresh();
+      setDefaults({ appointment_type: 'follow_up', remind_before_minutes: 1440 });
+      setDialog(true);
+      window.history.replaceState(null, '', window.location.pathname);
     }
-  }
+  }, [params]);
+
+  const isUpcoming = (a: Appt) =>
+    combineDateTime(a.appointment_date, normTime(a.appointment_time) || '23:59').getTime() >= Date.now();
+
+  const shown = rows
+    .filter((a) => (typeFilter === 'all' ? true : (a.appointment_type || 'appointment') === typeFilter))
+    .filter((a) => (filter === 'all' ? true : filter === 'upcoming' ? isUpcoming(a) : !isUpcoming(a)))
+    .sort((a, b) => {
+      const at = combineDateTime(a.appointment_date, a.appointment_time).getTime();
+      const bt = combineDateTime(b.appointment_date, b.appointment_time).getTime();
+      return filter === 'past' ? bt - at : at - bt;
+    });
+
+  const openNew = (d?: AppointmentDefaults) => {
+    setEditingAppt(null);
+    setDefaults(d);
+    setDialog(true);
+  };
+
+  const closeDialog = () => {
+    setDialog(false);
+    setEditingAppt(null);
+    setDefaults(undefined);
+  };
 
   async function remove(id: string) {
     if (!window.confirm('Delete this appointment?')) return;
@@ -2162,6 +1747,7 @@ function Appointments() {
       await recordAudit(user?.id, 'appointment_deleted', 'Appointment deleted');
       setNotice({ type: 'success', text: 'Appointment removed.' });
       refresh();
+      reminders.refresh();
     }
   }
 
@@ -2170,25 +1756,32 @@ function Appointments() {
       <PageHeading
         eyebrow="Care planning"
         title="Appointments"
-        subtitle="Organize upcoming consultations, diagnostic visits, and provider notes."
+        subtitle="Organize upcoming consultations, follow-up visits and provider notes with their exact date and time."
         action={
-          <button
-            onClick={() => {
-              setEditingAppt(null);
-              setDialog(true);
-            }}
-            className="mv-button inline-flex items-center gap-2 rounded-xl bg-primary px-4 py-3 text-sm font-semibold text-primary-foreground shadow-sm"
-            data-testid="button-new-appointment"
-          >
-            <CalendarPlus className="h-4 w-4" />
-            Add appointment
-          </button>
+          <div className="flex flex-wrap gap-2.5">
+            <button
+              onClick={() => openNew({ appointment_type: 'follow_up', remind_before_minutes: 1440 })}
+              className={ghostButtonCls + ' !py-3 !text-sm'}
+              data-testid="button-new-followup"
+            >
+              <Stethoscope className="h-4 w-4" />
+              Add follow-up
+            </button>
+            <button
+              onClick={() => openNew()}
+              className="mv-button inline-flex items-center gap-2 rounded-xl bg-primary px-4 py-3 text-sm font-semibold text-primary-foreground shadow-sm"
+              data-testid="button-new-appointment"
+            >
+              <CalendarPlus className="h-4 w-4" />
+              Add appointment
+            </button>
+          </div>
         }
       />
 
       <Notice notice={notice} dismiss={() => setNotice(null)} />
 
-      <div className="mb-5 flex gap-2">
+      <div className="mb-5 flex flex-wrap gap-2">
         {(
           [
             ['upcoming', 'Upcoming'],
@@ -2209,6 +1802,27 @@ function Appointments() {
             {l}
           </button>
         ))}
+        <span className="mx-1 hidden w-px bg-[#dce5dc] sm:block" />
+        {(
+          [
+            ['all', 'All types'],
+            ['appointment', 'Appointments'],
+            ['follow_up', 'Follow-ups'],
+          ] as const
+        ).map(([v, l]) => (
+          <button
+            key={v}
+            onClick={() => setTypeFilter(v)}
+            className={`rounded-full px-4 py-2 text-xs font-semibold transition ${
+              typeFilter === v
+                ? 'bg-[#dce9df] text-primary'
+                : 'bg-white text-[#73877d] hover:bg-white/80 border border-[#e1e9df]'
+            }`}
+            data-testid={`button-appointment-type-${v}`}
+          >
+            {l}
+          </button>
+        ))}
       </div>
 
       {error ? (
@@ -2224,10 +1838,7 @@ function Appointments() {
           body="Keep visit reminders and doctor consultations together with your medical files."
           action={
             <button
-              onClick={() => {
-                setEditingAppt(null);
-                setDialog(true);
-              }}
+              onClick={() => openNew()}
               className="mv-button inline-flex items-center gap-2 rounded-xl bg-primary px-4 py-2.5 text-xs font-semibold text-primary-foreground"
               data-testid="button-empty-add-appointment"
             >
@@ -2245,29 +1856,42 @@ function Appointments() {
             >
               <div className="min-w-[58px] rounded-xl bg-[#edf3eb] px-2 py-2 text-center border border-[#d8e2d8]">
                 <div className="text-[10px] font-bold uppercase text-primary">
-                  {new Date(a.appointment_date + 'T12:00:00').toLocaleDateString(undefined, {
-                    month: 'short',
-                  })}
+                  {parseDate(a.appointment_date).toLocaleDateString(undefined, { month: 'short' })}
                 </div>
-                <div className="text-xl font-bold">
-                  {new Date(a.appointment_date + 'T12:00:00').getDate()}
-                </div>
+                <div className="text-xl font-bold">{parseDate(a.appointment_date).getDate()}</div>
                 <div className="text-[9px] text-muted-foreground">
-                  {new Date(a.appointment_date + 'T12:00:00').getFullYear()}
+                  {parseDate(a.appointment_date).getFullYear()}
                 </div>
               </div>
               <div className="min-w-0 flex-1">
-                <p className="truncate text-sm font-semibold">{a.doctor_name || 'Appointment'}</p>
-                <p className="mt-0.5 truncate text-xs text-muted-foreground">
-                  {[a.hospital_name, a.appointment_time].filter(Boolean).join(' · ') ||
-                    'No location or time added'}
+                <p className="truncate text-sm font-semibold">
+                  {a.doctor_name || 'Appointment'}
+                  {a.appointment_type === 'follow_up' && (
+                    <span className="ml-2 align-middle">
+                      <Badge tone="blue">Follow-up</Badge>
+                    </span>
+                  )}
+                </p>
+                <p
+                  className="mt-0.5 truncate text-xs text-muted-foreground"
+                  data-testid={`text-appointment-when-${a.id}`}
+                >
+                  {[a.hospital_name, formatDateTime(a.appointment_date, a.appointment_time)]
+                    .filter(Boolean)
+                    .join(' · ')}
                 </p>
                 {a.reason && <p className="mt-1 truncate text-xs text-[#72857b]">{a.reason}</p>}
+                {a.remind_before_minutes !== null && a.remind_before_minutes !== undefined && (
+                  <p className="mt-1 text-[11px] text-[#72857b]">
+                    Reminder: {remindLabel(a.remind_before_minutes)}
+                  </p>
+                )}
               </div>
               <div className="flex items-center gap-1">
                 <button
                   onClick={() => {
                     setEditingAppt(a);
+                    setDefaults(undefined);
                     setDialog(true);
                   }}
                   aria-label="Edit appointment"
@@ -2291,109 +1915,18 @@ function Appointments() {
       )}
 
       {dialog && (
-        <Modal
-          title={editingAppt ? 'Edit appointment' : 'Add an appointment'}
-          close={() => {
-            setDialog(false);
-            setEditingAppt(null);
+        <AppointmentModal
+          initial={editingAppt}
+          defaults={defaults}
+          onClose={closeDialog}
+          onSaved={(message) => {
+            closeDialog();
+            setNotice({ type: 'success', text: message });
+            refresh();
+            reminders.refresh();
           }}
-        >
-          <form onSubmit={save} className="space-y-4" data-testid="form-appointment">
-            <div className="grid gap-4 sm:grid-cols-2">
-              <Field
-                label="Provider or Doctor"
-                name="doctor_name"
-                placeholder="e.g. Dr. Sarah Jenkins"
-                defaultValue={editingAppt?.doctor_name || ''}
-              />
-              <Field
-                label="Clinic or Hospital"
-                name="hospital_name"
-                placeholder="e.g. Metro Health Center"
-                defaultValue={editingAppt?.hospital_name || ''}
-              />
-              <Field
-                label="Date"
-                name="appointment_date"
-                type="date"
-                required
-                defaultValue={editingAppt?.appointment_date || today}
-              />
-              <Field
-                label="Time"
-                name="appointment_time"
-                type="time"
-                defaultValue={editingAppt?.appointment_time || ''}
-              />
-            </div>
-            <Field
-              label="Reason or visit type"
-              name="reason"
-              placeholder="e.g. Annual physical checkup"
-              defaultValue={editingAppt?.reason || ''}
-            />
-            <div>
-              <label
-                className="mb-1.5 block text-xs font-semibold text-[#49655b]"
-                htmlFor="appointment-notes"
-              >
-                Notes
-              </label>
-              <textarea
-                id="appointment-notes"
-                name="notes"
-                rows={3}
-                defaultValue={editingAppt?.notes || ''}
-                className="w-full rounded-xl border border-[#d9e3da] bg-white px-3.5 py-3 text-sm outline-none focus:border-primary"
-                data-testid="input-appointment-notes"
-              />
-            </div>
-            <button
-              disabled={busy}
-              className="mv-button flex w-full items-center justify-center gap-2 rounded-xl bg-primary px-4 py-3 text-sm font-semibold text-primary-foreground disabled:opacity-50"
-              data-testid="button-save-appointment"
-            >
-              {busy && <LoaderCircle className="h-4 w-4 animate-spin" />}
-              {editingAppt ? 'Update appointment' : 'Save appointment'}
-            </button>
-          </form>
-        </Modal>
+        />
       )}
-    </div>
-  );
-}
-
-function Modal({
-  title,
-  close,
-  children,
-}: {
-  title: string;
-  close: () => void;
-  children: ReactNode;
-}) {
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-end justify-center bg-[#1d3933]/35 p-0 backdrop-blur-[2px] sm:items-center sm:p-5"
-      onClick={close}
-    >
-      <div
-        className="max-h-[92dvh] w-full max-w-lg overflow-y-auto rounded-t-[24px] bg-[#fbfcf8] p-5 shadow-2xl sm:rounded-[24px] sm:p-7"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="mb-5 flex items-center justify-between">
-          <h2 className="mv-title text-2xl font-semibold">{title}</h2>
-          <button
-            onClick={close}
-            aria-label="Close dialog"
-            className="rounded-lg p-2 hover:bg-muted"
-            data-testid="button-close-dialog"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-        {children}
-      </div>
     </div>
   );
 }
@@ -2708,14 +2241,22 @@ function Sharing() {
                       </span>
                       <div className="min-w-0 flex-1">
                         <p className="truncate text-sm font-semibold">
+                          {sh.kind === 'visit_pack' && (
+                            <span className="mr-2 align-middle">
+                              <Badge tone="blue">Visit pack</Badge>
+                            </span>
+                          )}
                           Recipient: {sh.recipient || 'Shared link'}
                         </p>
+                        {sh.kind === 'visit_pack' && sh.title && (
+                          <p className="mt-0.5 truncate text-xs text-[#72857b]">{sh.title}</p>
+                        )}
                         <p className="mt-1 text-xs text-muted-foreground">
                           {isRevoked
                             ? 'Revoked'
                             : isExpired
                             ? 'Expired'
-                            : `Expires ${new Date(sh.expires_at).toLocaleString()}`}{' '}
+                            : `Expires ${formatTimestamp(sh.expires_at)}`}{' '}
                           · Permission: {sh.permission}
                         </p>
                       </div>
@@ -2750,178 +2291,6 @@ function Sharing() {
             </div>
           )}
         </section>
-      </div>
-    </div>
-  );
-}
-
-// -----------------------------------------------------------------------------
-// PUBLIC SHARE VIEWER (/share/:token)
-// -----------------------------------------------------------------------------
-function SharePublic({ token }: { token: string }) {
-  type PublicShareRecord = {
-    share_id: string;
-    permission: 'VIEW' | 'VIEW_DOWNLOAD';
-    recipient: string;
-    expires_at: string;
-    document_id: string;
-    title: string;
-    category: string;
-    file_name: string;
-    mime_type: string;
-    file_size: number;
-    storage_path: string;
-    document_date: string | null;
-    description: string | null;
-  };
-
-  const [state, setState] = useState<'checking' | 'valid' | 'invalid' | 'error'>('checking');
-  const [items, setItems] = useState<PublicShareRecord[]>([]);
-  const [downloadUrls, setDownloadUrls] = useState<Record<string, string>>({});
-  const [message, setMessage] = useState('Verifying temporary access…');
-
-  useEffect(() => {
-    let live = true;
-    async function verify() {
-      if (!isSupabaseConfigured) {
-        setState('error');
-        setMessage('MediVault storage is not connected.');
-        return;
-      }
-      try {
-        const hash = await hashToken(token);
-        const { data, error } = await supabase.rpc('get_medical_share', {
-          p_token_hash: hash,
-        });
-
-        if (error) throw error;
-        const records = (data || []) as PublicShareRecord[];
-
-        if (!records || records.length === 0) {
-          if (live) {
-            setState('invalid');
-            setMessage('This secure share link is invalid, expired, or has been revoked.');
-          }
-          return;
-        }
-
-        if (live) {
-          setItems(records);
-          setState('valid');
-
-          // Generate signed URLs if permission allows VIEW_DOWNLOAD or viewing
-          const urls: Record<string, string> = {};
-          for (const item of records) {
-            const { data: signed } = await supabase.storage
-              .from('medical-records')
-              .createSignedUrl(item.storage_path, 300);
-            if (signed?.signedUrl) {
-              urls[item.document_id] = signed.signedUrl;
-            }
-          }
-          setDownloadUrls(urls);
-        }
-      } catch (err: any) {
-        if (live) {
-          setState('error');
-          setMessage(err?.message || 'Unable to verify this secure link.');
-        }
-      }
-    }
-
-    void verify();
-    return () => {
-      live = false;
-    };
-  }, [token]);
-
-  return (
-    <div className="min-h-[100dvh] bg-[#f7f9f4] px-5 py-8">
-      <div className="mx-auto max-w-3xl">
-        <Brand />
-        <div className="mt-12">
-          {state === 'checking' ? (
-            <div className="mv-card p-8 text-center">
-              <LoaderCircle className="mx-auto h-6 w-6 animate-spin text-primary" />
-              <p className="mt-4 text-sm text-muted-foreground">{message}</p>
-            </div>
-          ) : state === 'valid' && items.length > 0 ? (
-            <div className="mv-enter">
-              <div className="mb-5 flex items-center gap-2 rounded-xl border border-[#cfe1d1] bg-[#eaf3e9] px-4 py-3 text-xs text-[#426e57]">
-                <ShieldCheck className="h-4 w-4" />
-                Valid temporary medical share. Only the selected documents are accessible.
-              </div>
-
-              <section className="mv-card p-6 sm:p-8">
-                <p className="text-xs font-bold uppercase tracking-wider text-primary">
-                  Shared for: {items[0].recipient}
-                </p>
-                <h1 className="mv-title mt-2 text-3xl font-semibold">Shared Medical Records</h1>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  Expires {new Date(items[0].expires_at).toLocaleString()} · Access level:{' '}
-                  {items[0].permission}
-                </p>
-
-                <div className="mt-6 divide-y divide-[#e8eee7]">
-                  {items.map((doc) => (
-                    <div key={doc.document_id} className="py-4">
-                      <div className="flex items-start justify-between gap-4">
-                        <div>
-                          <span className="text-[10px] font-bold uppercase text-primary">
-                            {doc.category || 'Record'}
-                          </span>
-                          <h3 className="text-lg font-semibold">{doc.title || doc.file_name}</h3>
-                          <p className="text-xs text-muted-foreground mt-0.5">
-                            Date:{' '}
-                            {doc.document_date
-                              ? new Date(doc.document_date + 'T12:00:00').toLocaleDateString()
-                              : 'Not specified'}
-                          </p>
-                          {doc.description && (
-                            <p className="mt-2 text-xs leading-relaxed text-[#586f64] bg-[#f2f5ef] p-3 rounded-lg">
-                              {doc.description}
-                            </p>
-                          )}
-                        </div>
-                        {downloadUrls[doc.document_id] && (
-                          <a
-                            href={downloadUrls[doc.document_id]}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="mv-button shrink-0 inline-flex items-center gap-2 rounded-xl bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground shadow-sm"
-                            data-testid="link-open-shared-file"
-                          >
-                            <ArrowDownToLine className="h-4 w-4" />
-                            {items[0].permission === 'VIEW_DOWNLOAD' ? 'Download' : 'View'}
-                          </a>
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </section>
-            </div>
-          ) : (
-            <div className="mv-card p-8 text-center">
-              <span className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-[#f5ece2] text-[#947049]">
-                <LockKeyhole className="h-5 w-5" />
-              </span>
-              <h1 className="mv-title mt-4 text-2xl font-semibold">
-                {state === 'invalid' ? 'Link Expired or Revoked' : 'Unable to Verify'}
-              </h1>
-              <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-muted-foreground" data-testid="status-public-share">
-                {message}
-              </p>
-              <Link
-                href="/"
-                className="mt-6 inline-flex items-center gap-2 text-sm font-semibold text-primary hover:underline"
-                data-testid="link-share-home"
-              >
-                Go to MediVault <ArrowRight className="h-4 w-4" />
-              </Link>
-            </div>
-          )}
-        </div>
       </div>
     </div>
   );
@@ -3005,7 +2374,9 @@ function ActivityPage() {
 // -----------------------------------------------------------------------------
 function Profile() {
   const { user } = useAuth();
+  const { profile, age: savedAge, refresh: refreshProfile } = useProfile();
   const [name, setName] = useState(String(user?.user_metadata?.full_name || ''));
+  const [dob, setDob] = useState('');
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<Notice>(null);
 
@@ -3013,9 +2384,24 @@ function Profile() {
     setName(String(user?.user_metadata?.full_name || ''));
   }, [user?.id, user?.user_metadata?.full_name]);
 
+  useEffect(() => {
+    setDob(profile?.date_of_birth || '');
+  }, [profile?.date_of_birth]);
+
+  // Age shown next to the field updates as you type; the saved value is recalculated daily.
+  const previewAge = calcAge(dob);
+
   async function save(e: FormEvent) {
     e.preventDefault();
     if (!user) return;
+    if (dob && dob > localToday()) {
+      setNotice({ type: 'error', text: 'Date of birth cannot be in the future.' });
+      return;
+    }
+    if (dob && dob < '1900-01-01') {
+      setNotice({ type: 'error', text: 'Please enter a valid date of birth.' });
+      return;
+    }
     setBusy(true);
     setNotice(null);
 
@@ -3036,16 +2422,32 @@ function Profile() {
         { onConflict: 'id' }
       );
 
-    setBusy(false);
     if (profileError) {
+      setBusy(false);
       setNotice({
         type: 'error',
         text: 'Auth metadata updated, but profile table update failed: ' + profileError.message,
       });
-    } else {
-      await recordAudit(user.id, 'profile_updated', 'Profile updated');
-      setNotice({ type: 'success', text: 'Your profile has been updated.' });
+      return;
     }
+
+    // Date of birth is saved separately so name changes never depend on it.
+    if (dob !== (profile?.date_of_birth || '')) {
+      const { error: dobError } = await supabase
+        .from('profiles')
+        .update({ date_of_birth: dob || null })
+        .eq('id', user.id);
+      if (dobError) {
+        setBusy(false);
+        setNotice({ type: 'error', text: `Name saved, but date of birth could not be saved: ${dobError.message}` });
+        return;
+      }
+    }
+
+    await recordAudit(user.id, 'profile_updated', 'Profile updated');
+    await refreshProfile();
+    setBusy(false);
+    setNotice({ type: 'success', text: 'Your profile has been updated.' });
   }
 
   return (
@@ -3078,6 +2480,37 @@ function Profile() {
             </div>
             <div>
               <label
+                htmlFor="profile-dob"
+                className="mb-1.5 block text-xs font-semibold text-[#49655b]"
+              >
+                Date of birth
+              </label>
+              <div className="flex flex-wrap items-center gap-3">
+                <input
+                  id="profile-dob"
+                  type="date"
+                  value={dob}
+                  max={localToday()}
+                  min="1900-01-01"
+                  onChange={(e) => setDob(e.target.value)}
+                  className="w-full rounded-xl border border-[#d9e3da] bg-[#fffefa] px-3.5 py-3 text-sm outline-none focus:border-primary sm:w-56"
+                  data-testid="input-profile-dob"
+                />
+                {previewAge && (
+                  <span
+                    className="inline-flex items-center gap-1.5 rounded-full bg-[#e5f1e6] px-3 py-1.5 text-xs font-semibold text-[#477461]"
+                    data-testid="text-profile-age-preview"
+                  >
+                    <Cake className="h-3.5 w-3.5" /> {formatAge(previewAge)} old
+                  </span>
+                )}
+              </div>
+              <p className="mt-1.5 text-[11px] text-muted-foreground">
+                Your age is calculated automatically from this date and is never stored.
+              </p>
+            </div>
+            <div>
+              <label
                 htmlFor="profile-email"
                 className="mb-1.5 block text-xs font-semibold text-[#49655b]"
               >
@@ -3105,12 +2538,32 @@ function Profile() {
           </button>
         </form>
 
-        <aside className="rounded-2xl bg-[#eaf1e8] p-5 border border-[#d8e4dd]">
-          <UserRound className="h-5 w-5 text-primary" />
-          <h3 className="mt-3 text-sm font-semibold">Account Identity</h3>
-          <p className="mt-2 text-xs leading-5 text-[#627a6f]">
-            Your sign-in identity ensures only you can access your encrypted health vault and records.
-          </p>
+        <aside className="space-y-4">
+          <div className="rounded-2xl border border-[#d8e4dd] bg-[#eaf1e8] p-5" data-testid="card-profile-age">
+            <Cake className="h-5 w-5 text-primary" />
+            <h3 className="mt-3 text-sm font-semibold">Current age</h3>
+            {savedAge ? (
+              <>
+                <p className="mt-1 text-3xl font-semibold tracking-tight" data-testid="text-profile-age">
+                  {formatAge(savedAge)}
+                </p>
+                <p className="mt-1 text-xs text-[#627a6f]" data-testid="text-profile-age-detail">
+                  {formatAgeDetailed(savedAge)}
+                </p>
+              </>
+            ) : (
+              <p className="mt-2 text-xs leading-5 text-[#627a6f]">
+                Add your date of birth and your current age will appear here and across MediVault.
+              </p>
+            )}
+          </div>
+          <div className="rounded-2xl bg-[#eaf1e8] p-5 border border-[#d8e4dd]">
+            <UserRound className="h-5 w-5 text-primary" />
+            <h3 className="mt-3 text-sm font-semibold">Account Identity</h3>
+            <p className="mt-2 text-xs leading-5 text-[#627a6f]">
+              Your sign-in identity ensures only you can access your encrypted health vault and records.
+            </p>
+          </div>
         </aside>
       </div>
     </div>
@@ -3280,7 +2733,7 @@ function AppRoutes() {
 
         <Route path="/timeline">
           <Protected>
-            <Timeline />
+            <TimelinePage />
           </Protected>
         </Route>
         <Route path="/appointments">
@@ -3301,6 +2754,31 @@ function AppRoutes() {
         <Route path="/activity">
           <Protected>
             <ActivityPage />
+          </Protected>
+        </Route>
+        <Route path="/medicines">
+          <Protected>
+            <MedicinesPage />
+          </Protected>
+        </Route>
+        <Route path="/receipts">
+          <Protected>
+            <ReceiptsPage />
+          </Protected>
+        </Route>
+        <Route path="/reminders">
+          <Protected>
+            <RemindersPage />
+          </Protected>
+        </Route>
+        <Route path="/visit-pack">
+          <Protected>
+            <VisitPackPage />
+          </Protected>
+        </Route>
+        <Route path="/search">
+          <Protected>
+            <SearchPage />
           </Protected>
         </Route>
         <Route path="/profile">
@@ -3327,7 +2805,11 @@ export default function App() {
       <TooltipProvider>
         <WouterRouter>
           <AuthProvider>
-            <AppRoutes />
+            <ProfileProvider>
+              <RemindersProvider>
+                <AppRoutes />
+              </RemindersProvider>
+            </ProfileProvider>
           </AuthProvider>
         </WouterRouter>
         <Toaster />

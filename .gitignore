@@ -34,3 +34,6 @@ Thumbs.db
 
 # Vite
 vite.config.ts.timestamp*
+
+# E2E screenshots
+e2e/artifacts/

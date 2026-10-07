@@ -798,6 +798,7 @@ function Field({
   required = false,
   autoComplete,
   value,
+  defaultValue,
   onChange,
 }: {
   label: string;
@@ -807,6 +808,7 @@ function Field({
   required?: boolean;
   autoComplete?: string;
   value?: string;
+  defaultValue?: string;
   onChange?: (e: React.ChangeEvent<HTMLInputElement>) => void;
 }) {
   return (
@@ -822,6 +824,7 @@ function Field({
         required={required}
         autoComplete={autoComplete}
         value={value}
+        defaultValue={defaultValue}
         onChange={onChange}
         data-testid={`input-${name.replaceAll('_', '-')}`}
         className="w-full rounded-xl border border-[#d9e3da] bg-[#fffefa] px-3.5 py-3 text-sm outline-none transition placeholder:text-[#a2b0a7] focus:border-primary focus:ring-2 focus:ring-primary/10"
